@@ -1,0 +1,17 @@
+
+\usepackage{xcolor}
+\definecolor{TexDiffRemovedColor}{RGB}{204,20,20}
+\definecolor{TexDiffAddedColor}{RGB}{15,51,217}
+\makeatletter
+\newcommand{\TexDiffMathTagColor}[1]{%
+  \ifdefined\maketag@@@
+    \let\TexDiffOriginalMathTag\maketag@@@
+    \def\maketag@@@##1{\TexDiffOriginalMathTag{\color{#1}##1}}%
+  \fi
+}
+\newcommand{\TexDiffAlignmentColor}[1]{%
+  \def\normalcolor{\color{#1}}%
+  \everymath\expandafter{\the\everymath\color{#1}}%
+  \TexDiffMathTagColor{#1}%
+}
+\makeatother

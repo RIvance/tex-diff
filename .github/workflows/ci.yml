@@ -1,0 +1,18 @@
+name: Rust checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - name: Install LaTeX and PDF test tools
+        run: sudo apt-get update && sudo apt-get install -y latexmk texlive-latex-extra texlive-xetex texlive-luatex poppler-utils
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked
+      - run: cargo run --locked --example demo -- --no-open
+      - run: cargo run --locked -- --doctor

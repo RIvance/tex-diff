@@ -1,0 +1,24 @@
+[package]
+name = "tex-diff"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Sentence and object diffs of LaTeX source, with Git-style revision selection"
+license = "MIT"
+exclude = ["target/**"]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.23"
+sha2 = "0.10"
+similar = "2.7"
+pest = "2.8"
+pest_derive = "2.8"
+lopdf = { version = "0.38", default-features = false }
+
+[dev-dependencies]
+png = "0.18"

@@ -1,0 +1,119 @@
+// Explicit whitespace is significant in TeX; there is deliberately no implicit
+// WHITESPACE rule. Groups validate braces, while math and verbatim stay opaque.
+source = { SOI ~ token* ~ EOI }
+
+// Package code is TeX token material, not a typeset document. Its math shifts
+// and even brace characters may be split across definitions or conditionals.
+package_source = {
+    SOI
+    ~ (comment | command | space | raw_open | raw_close | raw_character)*
+    ~ EOI
+}
+
+// A flat pass bounds nesting before entering recursive grammar rules. Comments,
+// escapes and verbatim literals cannot accidentally contribute brace depth.
+guard = {
+    SOI
+    ~ (comment | verbatim_environment | inline_verbatim | command
+       | guard_open | guard_close | guard_character)*
+    ~ EOI
+}
+guard_open = { "{" }
+guard_close = { "}" }
+guard_character = _{ ANY }
+
+token = _{
+    comment
+    | verbatim_environment
+    | inline_verbatim
+    | declaration
+    | display_dollars
+    | inline_dollars
+    | display_brackets
+    | inline_parentheses
+    | group
+    | command
+    | space
+    | character
+}
+group = { "{" ~ token* ~ "}" }
+command = @{ "\\" ~ ((ASCII_ALPHA | "@")+ | ANY) }
+space = @{ spacing+ }
+spacing = _{ " " | "\t" | "\r" | "\n" | "\u{000C}" }
+character = @{ !("\\" | "%" | "$" | "{" | "}" | spacing) ~ ANY }
+comment = { "%" ~ (!"\n" ~ ANY)* ~ "\n"? }
+
+// A declaration stores replacement tokens. In particular, environment begin
+// and end bodies need not each contain balanced math delimiters. Interpret
+// math only after a safe macro has received its arguments and been expanded.
+declaration = { new_command | primitive_definition | new_environment }
+trivia = _{ space | comment }
+
+new_command_head = @{
+    "\\"
+    ~ ("DeclareRobustCommand" | "providecommand" | "renewcommand" | "newcommand")
+    ~ !(ASCII_ALPHA | "@")
+}
+definition_head = @{
+    "\\" ~ ("edef" | "xdef" | "gdef" | "def") ~ !(ASCII_ALPHA | "@")
+}
+environment_head = @{
+    "\\"
+    ~ ("provideenvironment" | "renewenvironment" | "newenvironment")
+    ~ !(ASCII_ALPHA | "@")
+}
+
+new_command = _{
+    new_command_head ~ trivia*
+    ~ (raw_star ~ trivia*)?
+    ~ (raw_group | command) ~ trivia*
+    ~ (raw_optional ~ trivia*)?
+    ~ (raw_optional ~ trivia*)?
+    ~ raw_group
+}
+primitive_definition = _{
+    definition_head ~ trivia* ~ command
+    ~ (comment | command | space | raw_character)*
+    ~ raw_group
+}
+new_environment = _{
+    environment_head ~ trivia*
+    ~ (raw_star ~ trivia*)?
+    ~ raw_group ~ trivia*
+    ~ (raw_optional ~ trivia*)?
+    ~ (raw_optional ~ trivia*)?
+    ~ raw_group ~ trivia* ~ raw_group
+}
+
+raw_token = _{ comment | raw_group | command | space | raw_character }
+raw_group = { "{" ~ raw_token* ~ "}" }
+raw_optional = {
+    "["
+    ~ (comment | raw_group | raw_optional | command | space
+       | (!("]" | "[") ~ raw_character))*
+    ~ "]"
+}
+raw_star = { "*" }
+raw_open = { "{" }
+raw_close = { "}" }
+raw_character = @{ !("\\" | "%" | "{" | "}" | spacing) ~ ANY }
+
+inline_verbatim = @{
+    "\\verb" ~ "*"? ~ PUSH(!spacing ~ ANY) ~ (!PEEK ~ !"\n" ~ ANY)* ~ POP
+}
+verbatim_name = _{
+    "verbatim*" | "verbatim" | "Verbatim" | "lstlisting" | "minted" | "comment"
+}
+verbatim_environment = @{
+    "\\begin" ~ spacing* ~ "{" ~ PUSH(verbatim_name) ~ "}"
+    ~ (!("\\end{" ~ PEEK ~ "}") ~ ANY)*
+    ~ "\\end{" ~ POP ~ "}"
+}
+
+display_dollars = @{ "$$" ~ (!"$$" ~ math_item)* ~ "$$" }
+inline_dollars = @{ "$" ~ (!"$" ~ math_item)* ~ "$" }
+display_brackets = @{ "\\[" ~ (!"\\]" ~ math_item)* ~ "\\]" }
+inline_parentheses = @{ "\\(" ~ (!"\\)" ~ math_item)* ~ "\\)" }
+math_item = _{ math_group | comment | math_escape | (!("{" | "}" | "\\") ~ ANY) }
+math_group = _{ "{" ~ math_item* ~ "}" }
+math_escape = _{ "\\" ~ ANY }

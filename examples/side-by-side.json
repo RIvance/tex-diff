@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "old": "index",
+  "new": "working tree",
+  "changed": true,
+  "removed_sentences": 2,
+  "added_sentences": 2,
+  "removed_objects": 1,
+  "added_objects": 1,
+  "changes": [
+    {
+      "change": "removed",
+      "type": "sentence",
+      "text": "The original method uses two processing stages.",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 7,
+          "column": 37
+        }
+      ]
+    },
+    {
+      "change": "added",
+      "type": "sentence",
+      "text": "The revised method uses three processing stages.",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 7,
+          "column": 37
+        }
+      ]
+    },
+    {
+      "change": "removed",
+      "type": "sentence",
+      "text": "The original implementation handles a basic document.",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 11,
+          "column": 7
+        }
+      ]
+    },
+    {
+      "change": "added",
+      "type": "sentence",
+      "text": "The Rust implementation handles sentences, objects, and Git revisions.",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 11,
+          "column": 7
+        }
+      ]
+    },
+    {
+      "change": "removed",
+      "type": "figure",
+      "text": "\\begin{figure}[ht]\\centering\\setlength{\\unitlength}{1pt}\\begin{picture}(290,45)\\put(0,8){\\framebox(105,30){Parse source}}\\put(110,23){\\vector(1,0){60}}\\put(175,8){\\framebox(105,30){Build PDF}}\\end{picture}\\caption{The processing pipeline}\\end{figure}",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 14,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "change": "added",
+      "type": "figure",
+      "text": "\\begin{figure}[ht]\\centering\\setlength{\\unitlength}{1pt}\\begin{picture}(390,45)\\put(0,8){\\framebox(105,30){Parse source}}\\put(110,23){\\vector(1,0){25}}\\put(140,8){\\framebox(105,30){Mark changes}}\\put(250,23){\\vector(1,0){25}}\\put(280,8){\\framebox(105,30){Build PDF}}\\end{picture}\\caption{The processing pipeline}\\end{figure}",
+      "locations": [
+        {
+          "file": "main.tex",
+          "line": 14,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}
