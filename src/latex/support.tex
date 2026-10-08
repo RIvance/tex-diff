@@ -1,8 +1,43 @@
 
 \usepackage{xcolor}
+\begingroup
+\convertcolorsDfalse
+\globalcolorstrue
 \definecolor{TexDiffRemovedColor}{RGB}{204,20,20}
 \definecolor{TexDiffAddedColor}{RGB}{15,51,217}
+\endgroup
 \makeatletter
+\newcommand{\TexDiffRemovedKey}[1]{%
+  \ifcsname r@tex-diff-removed:#1\endcsname
+    tex-diff-removed:#1%
+  \else
+    #1%
+  \fi
+}
+
+\newcommand{\TexDiffBoxColor}[1]{%
+  \let\TexDiffOriginalSetColor\set@color
+  \let\set@color\relax
+  \color{#1}%
+  \let\set@color\TexDiffOriginalSetColor
+}
+\DeclareRobustCommand{\TexDiffBoxBegin}[1]{%
+  \colorlet{TexDiffPreviousColor}{.}%
+  \let\TexDiffPreviousNormalColor\normalcolor
+  \def\normalcolor{\color{#1}}%
+  \TexDiffBoxColor{#1}%
+}
+\DeclareRobustCommand{\TexDiffBoxEnd}{%
+  \let\normalcolor\TexDiffPreviousNormalColor
+  \TexDiffBoxColor{TexDiffPreviousColor}%
+}
+\let\TexDiffParagraphColor\relax
+\AddToHook{para/begin}[tex-diff/paragraph]{\TexDiffParagraphColor}
+\newcommand{\TexDiffEnvironmentColor}[1]{%
+  \def\normalcolor{\color{#1}}%
+  \def\TexDiffParagraphColor{\color{#1}}%
+  \TexDiffBoxColor{#1}%
+}
 \newcommand{\TexDiffMathTagColor}[1]{%
   \ifdefined\maketag@@@
     \let\TexDiffOriginalMathTag\maketag@@@

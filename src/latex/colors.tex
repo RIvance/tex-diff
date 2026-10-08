@@ -1,0 +1,201 @@
+\makeatletter
+\ExplSyntaxOn
+\prop_new:N \l__texdiff_rendered_colors_prop
+\bool_new:N \l__texdiff_preserve_color_bool
+\bool_new:N \l__texdiff_previous_preserve_color_bool
+\bool_new:N \l__texdiff_global_alias_bool
+\tl_new:N \l__texdiff_color_spec_tl
+\tl_new:N \l__texdiff_color_binding_tl
+\tl_new:N \l__texdiff_rgb_tl
+\fp_new:N \l__texdiff_lightness_fp
+\fp_new:N \l__texdiff_chroma_fp
+\fp_new:N \l__texdiff_saturation_scale_fp
+
+\prg_new_protected_conditional:Npnn \texdiff_if_rendered:n #1 {TF}
+  {
+    \tl_set:Nx \l_tmpa_tl {#1}
+    \tl_trim_spaces:N \l_tmpa_tl
+    \str_case:VnF \l_tmpa_tl
+      {
+        {.} {\prg_return_true:}
+        {TexDiffRemovedColor} {\prg_return_true:}
+        {TexDiffAddedColor} {\prg_return_true:}
+      }
+      {
+        \prop_get:NVNTF \l__texdiff_rendered_colors_prop \l_tmpa_tl \l_tmpb_tl
+          {
+            \tl_set:Nx \l__texdiff_color_binding_tl
+              {\cs_meaning:c {\c_backslash_str color@\l_tmpa_tl}}
+            \tl_if_eq:NNTF \l_tmpb_tl \l__texdiff_color_binding_tl
+              {\prg_return_true:}
+              {\prg_return_false:}
+          }
+          {\prg_return_false:}
+      }
+  }
+
+% Cap HSL saturation at one quarter, preserving hue and lightness.
+% Neutral and already muted colors survive repeated use without darkening.
+\cs_new_protected:Npn \texdiff_desaturate:nnN #1#2#3
+  {
+    \convertcolorspec {#1} {#2} {rgb} \l__texdiff_rgb_tl
+    \exp_after:wN \texdiff_desaturate_rgb:w \l__texdiff_rgb_tl \q_stop #3
+  }
+
+\cs_new_protected:Npn \texdiff_desaturate_rgb:w #1,#2,#3\q_stop #4
+  {
+    \fp_set:Nn \l__texdiff_lightness_fp
+      {(max(#1,#2,#3) + min(#1,#2,#3)) / 2}
+    \fp_set:Nn \l__texdiff_chroma_fp {max(#1,#2,#3) - min(#1,#2,#3)}
+    \fp_set:Nn \l__texdiff_saturation_scale_fp {1}
+    \fp_compare:nNnT {\l__texdiff_chroma_fp} > {0}
+      {
+        \fp_set:Nn \l__texdiff_saturation_scale_fp
+          {min(1,0.25*(1-abs(2*\l__texdiff_lightness_fp-1))/\l__texdiff_chroma_fp)}
+      }
+    \tl_set:Nx #4
+      {
+        {\use:c {XC@mod@rgb}}
+        {
+          \texdiff_muted_channel:n {#1},
+          \texdiff_muted_channel:n {#2},
+          \texdiff_muted_channel:n {#3}
+        }
+      }
+  }
+
+\cs_new:Npn \texdiff_muted_channel:n #1
+  {
+    \fp_eval:n
+      {
+        round(\l__texdiff_lightness_fp +
+          \l__texdiff_saturation_scale_fp*((#1)-\l__texdiff_lightness_fp),5)
+      }
+  }
+
+% Resolve mixed colors in their original palette before converting once.
+% Named palette definitions remain intact for links and future color aliases.
+\cs_new_protected:Npn \texdiff_extract_color:nN #1#2
+  {
+    \group_begin:
+      \extractcolorspec {#1} \l__texdiff_color_spec_tl
+      \bool_if:NF \l__texdiff_preserve_color_bool
+        {
+          \texdiff_if_rendered:nTF {#1} {}
+            {
+              \exp_after:wN \texdiff_desaturate:nnN
+                \l__texdiff_color_spec_tl \l__texdiff_color_spec_tl
+            }
+        }
+    \exp_args:NNNV \group_end: \tl_set:Nn #2 \l__texdiff_color_spec_tl
+  }
+
+\cs_new_protected:Npn \texdiff_color:nn #1#2
+  {
+    \bool_if:NTF \l__texdiff_preserve_color_bool
+      {
+        \IfNoValueTF {#1}
+          {\TexDiffOriginalColor {#2}}
+          {\TexDiffOriginalColor [#1] {#2}}
+      }
+      {
+        \IfNoValueTF {#1}
+          {\texdiff_extract_color:nN {#2} \l__texdiff_color_spec_tl}
+          {\texdiff_desaturate:nnN {#1} {#2} \l__texdiff_color_spec_tl}
+        \exp_after:wN \texdiff_set_color:nn \l__texdiff_color_spec_tl
+      }
+    \ignorespaces
+  }
+
+\cs_new_protected:Npn \texdiff_set_color:nn #1#2
+  {
+    \let\TexDiffPreviousConversion\ifconvertcolorsU
+    \convertcolorsUfalse
+    \TexDiffOriginalColor [#1] {#2}
+    \let\ifconvertcolorsU\TexDiffPreviousConversion
+  }
+
+% Remember the actual binding, so redefining an alias resumes conversion.
+\cs_new_protected:Npn \texdiff_remember_color:n #1
+  {
+    \tl_set:Nx \l_tmpa_tl {#1}
+    \tl_set:Nx \l_tmpb_tl
+      {\cs_meaning:c {\c_backslash_str color@\l_tmpa_tl}}
+    \bool_if:NTF \l__texdiff_global_alias_bool
+      {\prop_gput:NVV \l__texdiff_rendered_colors_prop \l_tmpa_tl \l_tmpb_tl}
+      {\prop_put:NVV \l__texdiff_rendered_colors_prop \l_tmpa_tl \l_tmpb_tl}
+  }
+
+\cs_new_protected:Npn \texdiff_alias_scope:
+  {
+    \bool_set_false:N \l__texdiff_global_alias_bool
+    \ifglobalcolors \bool_set_true:N \l__texdiff_global_alias_bool \fi
+    \ifx\xglobal@\global \bool_set_true:N \l__texdiff_global_alias_bool \fi
+  }
+
+\cs_new_protected:Npn \texdiff_colorlet:nnnn #1#2#3#4
+  {
+    \texdiff_alias_scope:
+    \texdiff_if_rendered:nTF {#4}
+      {
+        \let\TexDiffPreviousDefinitionConversion\ifconvertcolorsD
+        \convertcolorsDfalse
+        \TexDiffOriginalColorlet [#1] {#2} [rgb] {#4}
+        \let\ifconvertcolorsD\TexDiffPreviousDefinitionConversion
+        \texdiff_remember_color:n {#2}
+      }
+      {\TexDiffOriginalColorlet [#1] {#2} [#3] {#4}}
+  }
+
+% PGF reads color definitions directly for strokes, fills and gradients.
+% Convert its private aliases, leaving the document's palette untouched.
+\cs_new_protected:Npn \texdiff_pgf_colorlet:nn #1#2
+  {
+    \texdiff_alias_scope:
+    \texdiff_extract_color:nN {#2} \l__texdiff_color_spec_tl
+    \exp_after:wN \texdiff_define_rendered:nnn \l__texdiff_color_spec_tl {#1}
+    \texdiff_remember_color:n {#1}
+  }
+
+\cs_new_protected:Npn \texdiff_define_rendered:nnn #1#2#3
+  {
+    \let\TexDiffPreviousDefinitionConversion\ifconvertcolorsD
+    \convertcolorsDfalse
+    \definecolor {#3} {#1} {#2}
+    \let\ifconvertcolorsD\TexDiffPreviousDefinitionConversion
+  }
+
+\cs_new_protected:Npn \TexDiffMutePgfColors
+  {
+    \cs_set_eq:NN \pgfutil@colorlet \texdiff_pgf_colorlet:nn
+    \cs_set_eq:NN \pgfutil@extractcolorspec \texdiff_extract_color:nN
+  }
+
+\cs_new_protected:Npn \TexDiffPreserveLinkColors
+  {
+    \cs_new_eq:NN \texdiff_original_link_color:n \HyColor@UseColor
+    \cs_set_protected:Npn \HyColor@UseColor ##1
+      {
+        \bool_set_eq:NN \l__texdiff_previous_preserve_color_bool
+          \l__texdiff_preserve_color_bool
+        \bool_set_true:N \l__texdiff_preserve_color_bool
+        \texdiff_original_link_color:n {##1}
+        \bool_set_eq:NN \l__texdiff_preserve_color_bool
+          \l__texdiff_previous_preserve_color_bool
+        \ignorespaces
+      }
+  }
+
+\cs_new_protected:Npn \TexDiffMuteColors
+  {
+    \NewCommandCopy\TexDiffOriginalColor\color
+    \NewCommandCopy\TexDiffOriginalColorlet\colorlet
+    \RenewDocumentCommand\color {o m} {\texdiff_color:nn {##1}{##2}}
+    \RenewDocumentCommand\colorlet {O{} m O{} m}
+      {\texdiff_colorlet:nnnn {##1}{##2}{##3}{##4}}
+  }
+\AddToHook{package/xcolor/after}{\TexDiffMuteColors}
+\AddToHook{package/pgfcore/after}{\TexDiffMutePgfColors}
+\AddToHook{package/hyperref/after}{\TexDiffPreserveLinkColors}
+\ExplSyntaxOff
+\makeatother

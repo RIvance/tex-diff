@@ -204,6 +204,66 @@ fn parameter_optional_and_nested_macros_are_expanded_without_losing_style() {
 }
 
 #[test]
+fn commented_macro_lines_do_not_add_spaces_to_replacements() {
+    let f = Fixture::new("The result is foobar.", "");
+    for declaration in [
+        "\\newcommand{\\choice}{%\n  foobar}\n",
+        "\\newcommand{\\choice}{foo% ignored newline\n  bar}\n",
+    ] {
+        f.document("new", declaration, r"The result is \choice{}.");
+        assert!(!f.compare().unwrap().report.changed);
+    }
+}
+
+#[test]
+fn macros_with_internal_commands_keep_their_calls_and_track_definition_changes() {
+    let body = r"\[\workrule{Val}\] This remains.";
+    let f = Fixture::new(body, body);
+    for (side, value) in [("old", "original"), ("new", "updated")] {
+        f.document(
+            side,
+            &format!(
+                r"\makeatletter\newcommand{{\workrule}}[1]{{\protected@edef\@currentlabel{{{value}:#1}}\downarrow}}\makeatother"
+            ),
+            body,
+        );
+    }
+    let review = f.compare().unwrap();
+    assert_eq!(review.report.removed_objects, 1);
+    assert_eq!(review.report.added_objects, 1);
+    for source in [&review.unified_source, review.new_source.as_ref().unwrap()] {
+        let tex = fs::read_to_string(source).unwrap();
+        let body = tex.split_once(r"\begin{document}").unwrap().1;
+        assert!(body.contains(r"\workrule{Val}"));
+        assert!(!body.contains(r"\protected@edef"));
+    }
+    let bindings = fs::read_to_string(review.assets.join("old-macros.tex")).unwrap();
+    assert!(bindings.contains(r"\protected@edef\@currentlabel{original:#1}"));
+}
+
+#[test]
+fn macros_with_internal_commands_in_optional_defaults_are_not_expanded() {
+    let body = r"The value is $\choose$.";
+    let f = Fixture::new(body, body);
+    for side in ["old", "new"] {
+        f.document(
+            side,
+            r"\makeatletter\newcommand{\internal@symbol}{\rightarrow}\newcommand{\choose}[1][\internal@symbol]{#1}\makeatother",
+            body,
+        );
+    }
+    let review = f.compare().unwrap();
+    assert!(!review.report.changed);
+    let tex = fs::read_to_string(review.new_source.unwrap()).unwrap();
+    assert!(
+        tex.split_once(r"\begin{document}")
+            .unwrap()
+            .1
+            .contains(r"$\choose$")
+    );
+}
+
+#[test]
 fn math_is_opaque_to_sentence_splitting_and_normalizes_math_whitespace() {
     let f = Fixture::new(
         r"The value is $x+y=3.14$. This remains.",

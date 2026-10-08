@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -10,6 +10,10 @@ use std::{
 const LOG_TAIL_BYTES: u64 = 32 * 1024;
 
 const LOG_TAIL_LINES: usize = 18;
+
+const LOG_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+const MAX_LOG_ERRORS: usize = 6;
 
 /// Run a command with captured diagnostics and a deadline for its process group.
 pub fn run_logged(mut cmd: Command, log: &Path, timeout: Duration) -> Result<()> {
@@ -40,13 +44,16 @@ pub fn run_logged(mut cmd: Command, log: &Path, timeout: Duration) -> Result<()>
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                ensure!(
-                    status.success(),
-                    "{:?} failed ({status}); see {}\n{}",
-                    cmd.get_program(),
-                    log.display(),
-                    log_tail(log)
-                );
+                if !status.success() {
+                    // A failed worker can exit before its subprocesses do.
+                    terminate(&mut child, own_group);
+                    anyhow::bail!(
+                        "{:?} failed ({status}); see {}\n{}",
+                        cmd.get_program(),
+                        log.display(),
+                        log_diagnostics(log)
+                    );
+                }
                 return Ok(());
             }
             Ok(None) => {}
@@ -113,7 +120,6 @@ pub fn compile(
                 _ => "-pdf",
             },
             "-interaction=nonstopmode",
-            "-halt-on-error",
             "-file-line-error",
             "-latexoption=-no-shell-escape",
         ])
@@ -132,6 +138,83 @@ pub fn compile(
         pdf.display()
     );
     Ok(pdf)
+}
+
+fn tex_error(line: &str) -> bool {
+    if line.starts_with("! ") {
+        return true;
+    }
+    line.match_indices(": ").any(|(end, _)| {
+        line[..end].rsplit_once(':').is_some_and(|(file, number)| {
+            !file.is_empty()
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn log_diagnostics(path: &Path) -> String {
+    let Ok(file) = File::open(path) else {
+        return String::new();
+    };
+    let mut diagnostics = Vec::new();
+    let mut wrapped = String::new();
+    let mut context = 0;
+    let mut errors = 0;
+    // TeX errors can precede pages of warnings. Scan with bounded memory and
+    // output, retaining error locations and the following source context.
+    for line in BufReader::new(file).take(LOG_SCAN_BYTES).split(b'\n') {
+        let Ok(bytes) = line else { break };
+        let line = String::from_utf8_lossy(&bytes);
+        let line = line.trim_end_matches('\r');
+        let starts_path = line.starts_with('/')
+            || line.starts_with("./")
+            || line.starts_with("../")
+            || line.as_bytes().get(1) == Some(&b':');
+        let joined = format!("{wrapped}{line}");
+        let error = if tex_error(line) {
+            Some(line)
+        } else if tex_error(&joined) {
+            Some(joined.as_str())
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            if errors == MAX_LOG_ERRORS {
+                diagnostics.push("Further errors are in the full log.".to_owned());
+                break;
+            }
+            if errors > 0 {
+                diagnostics.push(String::new());
+            }
+            diagnostics.push(error.chars().take(2048).collect());
+            errors += 1;
+            context = 5;
+            wrapped.clear();
+        } else {
+            if context > 0 {
+                if starts_path {
+                    context = 0;
+                } else {
+                    diagnostics.push(line.chars().take(2048).collect());
+                    context = if line.is_empty() { 0 } else { context - 1 };
+                }
+            }
+            // TeX wraps long file paths, sometimes even within a line number.
+            // A new path also separates diagnostics from package-loading noise.
+            if line.is_empty() || starts_path || wrapped.len() + line.len() > 2048 {
+                wrapped.clear();
+            }
+            if wrapped.len() + line.len() <= 2048 {
+                wrapped.push_str(line);
+            }
+        }
+    }
+    if errors == 0 {
+        log_tail(path)
+    } else {
+        diagnostics.join("\n")
+    }
 }
 
 fn log_tail(path: &Path) -> String {

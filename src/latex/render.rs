@@ -85,6 +85,29 @@ fn recolor(tex: &str, side: ChangeType, figures: bool, preserve_layout: bool) ->
             i = end;
             continue;
         }
+        if !preserve_layout
+            && side == ChangeType::Removed
+            && ["ref", "pageref", "autoref", "eqref", "nameref"]
+                .iter()
+                .any(|name| token.command(name))
+        {
+            let mut start = i + 1;
+            if tokens
+                .get(start)
+                .is_some_and(|token| token.kind == lexer::Kind::Char('*'))
+            {
+                start += 1;
+            }
+            if let Some((label, end)) = lexer::group(&tokens, start) {
+                out.push_str(&format!(
+                    "{}{{\\TexDiffRemovedKey{{{}}}}}",
+                    lexer::source(&tokens[i..start]),
+                    lexer::source(label)
+                ));
+                i = end;
+                continue;
+            }
+        }
         if figures && token.command("includegraphics") {
             let mut end = i + 1;
             if tokens
@@ -134,6 +157,47 @@ fn marked_tex(tex: &str, side: ChangeType, figures: bool) -> Result<String> {
     ))
 }
 
+fn stored_box_markup(
+    tex: &str,
+    side: ChangeType,
+    figures: bool,
+    preserve_layout: bool,
+) -> Result<String> {
+    // Box assignments must survive this annotation. Set their inherited color
+    // without adding PDF color nodes to the surrounding paragraph; those nodes
+    // can preserve trailing glue and create an otherwise empty line.
+    Ok(format!(
+        "\\TexDiffBoxBegin{{{}}}{}\\TexDiffBoxEnd{{}}",
+        color(side),
+        recolor(tex, side, figures, preserve_layout)?
+    ))
+}
+
+fn stores_boxes(tex: &str, doc: &Document) -> Result<bool> {
+    let tokens = lexer::tokens(tex, Path::new("box-assignment.tex"))?;
+    let mut pending = vec![tokens.as_slice()];
+    let mut seen = BTreeSet::new();
+    while let Some(tokens) = pending.pop() {
+        for token in tokens {
+            let lexer::Kind::Command(name) = &token.kind else {
+                continue;
+            };
+            if ["sbox", "savebox", "setbox"].contains(&name.as_str()) {
+                return Ok(true);
+            }
+            if seen.insert(name)
+                && let Some(definition) = doc.macros.get(name)
+            {
+                pending.push(&definition.body);
+                if let Some(default) = &definition.default {
+                    pending.push(default);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 impl Writer<'_> {
     fn record(&mut self, unit: &Unit, side: ChangeType) {
         if side == ChangeType::Removed {
@@ -160,6 +224,13 @@ impl Writer<'_> {
         let mut raw = plain(unit);
         if !leading {
             raw = raw[unit.leading.len()..].to_owned();
+        }
+        if side == ChangeType::Added
+            && unit.kind == Kind::Sentence
+            && let Some(doc) = self.new
+            && stores_boxes(&raw, doc)?
+        {
+            return stored_box_markup(&raw, side, false, false);
         }
         marked_tex(&raw, side, unit.kind == Kind::Figure)
     }
@@ -316,23 +387,46 @@ fn packages(preamble: &str) -> Result<BTreeMap<String, String>> {
 }
 
 fn page_markup(tex: &str, side: ChangeType, figures: bool, inline: bool) -> Result<String> {
-    let normal = if inline {
-        String::new()
-    } else {
-        format!("\\def\\normalcolor{{\\color{{{}}}}}", color(side))
-    };
+    if inline {
+        return Ok(format!(
+            "\\begingroup\\color{{{}}}{}\\endgroup{{}}",
+            color(side),
+            recolor(tex, side, figures, true)?
+        ));
+    }
+    let tex = recolor(tex, side, figures, true)?;
+    let tokens = lexer::tokens(&tex, Path::new("page-object.tex"))?;
+    if tokens.first().is_some_and(|token| token.command("begin"))
+        && let Some((name, _)) = lexer::group(&tokens, 1)
+        && ["figure", "figure*", "table", "table*"].contains(&lexer::source(name).as_str())
+    {
+        return Ok(format!(
+            "\\AddToHookNext{{env/{}/begin}}{{\\TexDiffEnvironmentColor{{{}}}}}{tex}",
+            lexer::source(name),
+            color(side),
+        ));
+    }
     Ok(format!(
-        "\\begingroup{normal}\\color{{{}}}{}\\endgroup{}",
+        "\\begingroup\\def\\normalcolor{{\\color{{{}}}}}\\color{{{}}}{}\\endgroup ",
         color(side),
-        recolor(tex, side, figures, true)?,
-        if inline { "{}" } else { " " }
+        color(side),
+        tex
     ))
 }
 
-fn page_unit(unit: &Unit, marks: &BTreeSet<usize>, side: ChangeType) -> Result<String> {
+fn page_unit(
+    unit: &Unit,
+    marks: &BTreeSet<usize>,
+    side: ChangeType,
+    doc: &Document,
+) -> Result<String> {
     if unit.kind == Kind::Sentence {
         let text = if marks.contains(&unit.id) {
-            page_markup(&unit.tex, side, false, true)?
+            if stores_boxes(&unit.tex, doc)? {
+                stored_box_markup(&unit.tex, side, false, true)?
+            } else {
+                page_markup(&unit.tex, side, false, true)?
+            }
         } else {
             unit.tex.clone()
         };
@@ -341,10 +435,35 @@ fn page_unit(unit: &Unit, marks: &BTreeSet<usize>, side: ChangeType) -> Result<S
             unit.leading, unit.page_leading, text, unit.page_trailing
         ));
     }
+    if let Some(children) = &unit.children {
+        let body = children
+            .iter()
+            .map(|child| page_unit(child, marks, side, doc))
+            .collect::<Result<String>>()?;
+        // Start coloring inside the original environment. An outer group can
+        // add a numbered blank line before a list or theorem.
+        if marks.contains(&unit.id) {
+            let head = lexer::tokens(&unit.head, Path::new("page-environment.tex"))?;
+            let (name, _) = lexer::group(&head, 1).context("environment has no name")?;
+            return Ok(format!(
+                "{}\\AddToHookNext{{env/{}/begin}}{{\\TexDiffEnvironmentColor{{{}}}}}{}{}{}",
+                unit.leading,
+                lexer::source(name),
+                color(side),
+                unit.head,
+                body,
+                unit.tail
+            ));
+        }
+        return Ok(format!(
+            "{}{}{}{}",
+            unit.leading, unit.head, body, unit.tail
+        ));
+    }
     if marks.contains(&unit.id) {
         if unit.kind == Kind::Math {
-            // Keep color resets inside the original math scope. An outer
-            // group can add a numbered blank line after a theorem's display.
+            // Keep resets inside the original math scope. An outer group can
+            // add a numbered blank line after a theorem's display.
             let tex = recolor(&unit.tex, side, false, true)?;
             let tokens = lexer::tokens(&tex, Path::new("math.tex"))?;
             if tokens.len() == 1 && matches!(tokens[0].kind, lexer::Kind::Math(_)) {
@@ -444,22 +563,14 @@ fn page_unit(unit: &Unit, marks: &BTreeSet<usize>, side: ChangeType) -> Result<S
             )?
         ));
     }
-    if let Some(children) = &unit.children {
-        let children = children
-            .iter()
-            .map(|unit| page_unit(unit, marks, side))
-            .collect::<Result<Vec<_>>>()?
-            .join("");
-        Ok(format!(
-            "{}{}{}{}",
-            unit.leading, unit.head, children, unit.tail
-        ))
-    } else {
-        Ok(plain(unit))
-    }
+    Ok(plain(unit))
 }
 
 const SUPPORT: &str = include_str!("support.tex");
+
+const COLORS: &str = include_str!("colors.tex");
+
+const GRAPHICS: &str = include_str!("graphics.tex");
 
 fn input_path(doc: &Document, asset_name: &str, side: &str) -> String {
     if doc.resources.is_empty() {
@@ -570,9 +681,54 @@ fn old_macro_bindings(old: Option<&Document>, base: &Document) -> String {
                     .replace("\\xdef", "\\edef")
             ));
         }
+        for alias in label_aliases(old) {
+            // A declaration may be conditional or local to a macro. Only
+            // rebind aliases that actually refer to the active label command.
+            bindings.push_str(&format!(
+                "\\ifx\\{alias}\\label\n\
+                 \\expandafter\\let\\csname TexDiffOriginalLabel:{alias}\\endcsname\\{alias}\n\
+                 \\def\\{alias}#1{{\\csname TexDiffOriginalLabel:{alias}\\endcsname{{tex-diff-removed:#1}}}}\n\
+                 \\fi\n"
+            ));
+        }
     }
     bindings.push_str("\\makeatother\n");
     bindings
+}
+
+fn label_aliases(doc: &Document) -> BTreeSet<String> {
+    let Ok(tokens) = lexer::package_tokens(&doc.preamble, Path::new("label-aliases.tex")) else {
+        return BTreeSet::new();
+    };
+    let mut aliases = BTreeSet::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if !token.command("let") {
+            continue;
+        }
+        let target = lexer::skip_space(&tokens, index + 1);
+        let Some(lexer::Token {
+            kind: lexer::Kind::Command(name),
+            ..
+        }) = tokens.get(target)
+        else {
+            continue;
+        };
+        let mut source = lexer::skip_space(&tokens, target + 1);
+        if tokens
+            .get(source)
+            .is_some_and(|token| token.kind == lexer::Kind::Char('='))
+        {
+            source = lexer::skip_space(&tokens, source + 1);
+        }
+        if name != "label"
+            && tokens
+                .get(source)
+                .is_some_and(|token| token.command("label"))
+        {
+            aliases.insert(name.clone());
+        }
+    }
+    aliases
 }
 
 fn write_document(
@@ -585,7 +741,7 @@ fn write_document(
 ) -> Result<()> {
     let tex = format!(
         "% Generated by tex-diff. Changes were found in LaTeX source.\n\
-         {inputs}{preamble}{SUPPORT}\\begin{{document}}\n\
+         {inputs}{COLORS}{GRAPHICS}{preamble}{SUPPORT}\\begin{{document}}\n\
          {body}{}\n\\end{{document}}\n",
         doc.trailing
     )
@@ -642,7 +798,7 @@ fn write_page_source(
     let body = doc
         .units
         .iter()
-        .map(|u| page_unit(u, marks, side))
+        .map(|u| page_unit(u, marks, side, doc))
         .collect::<Result<Vec<_>>>()?
         .join("");
     let mut preamble = doc.preamble.clone();
@@ -737,6 +893,8 @@ pub(super) fn generate(
     // Resource lookup code is part of the immutable exported asset format.
     hash.update(b"tex-diff-source-assets-v3\0");
     hash.update(SUPPORT.as_bytes());
+    hash.update(COLORS.as_bytes());
+    hash.update(GRAPHICS.as_bytes());
     hash.update(format!("{preamble}{body}{bindings}").as_bytes());
     for (doc, marks, side) in [
         (old, &writer.old_marks, ChangeType::Removed),
@@ -744,7 +902,7 @@ pub(super) fn generate(
     ] {
         if let Some(doc) = doc {
             for unit in &doc.units {
-                hash.update(page_unit(unit, marks, side)?.as_bytes());
+                hash.update(page_unit(unit, marks, side, doc)?.as_bytes());
             }
         }
     }

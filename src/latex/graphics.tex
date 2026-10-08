@@ -1,0 +1,70 @@
+\makeatletter
+\newsavebox{\TexDiffImageBox}
+\newcount\TexDiffImageIndex
+
+% Fade an isolated image group, so opacity inside an imported PDF cannot
+% override the review's opacity. Box dimensions and searchable text survive.
+\newcommand{\TexDiffMutedImage}{%
+  \ifdefined\XeTeXrevision
+    \TexDiffXeImageGroup{ /Group << /S /Transparency /I true >> }%
+    \setbox\TexDiffImageBox=\hbox{%
+      \special{pdf:literal direct q /TexDiffImageOpacity gs}%
+      \box\TexDiffImageBox
+      \special{pdf:literal direct Q}%
+    }%
+    \TexDiffXeImageGroup{}%
+  \else\ifdefined\directlua
+    \saveboxresource attr { /Group << /S /Transparency /I true >> }
+      \TexDiffImageBox
+    \setbox\TexDiffImageBox=\hbox{%
+      \pdfextension literal {q /TexDiffImageOpacity gs}%
+      \useboxresource\lastsavedboxresourceindex
+      \pdfextension literal {Q}%
+    }%
+    \saveboxresource resources { /ExtGState << /TexDiffImageOpacity << /ca 0.2 /CA 0.2 >> >> }
+      \TexDiffImageBox
+    \setbox\TexDiffImageBox=\hbox{\useboxresource\lastsavedboxresourceindex}%
+  \else
+    \pdfxform attr { /Group << /S /Transparency /I true >> }
+      \TexDiffImageBox
+    \setbox\TexDiffImageBox=\hbox{%
+      \pdfliteral{q /TexDiffImageOpacity gs}%
+      \pdfrefxform\pdflastxform
+      \pdfliteral{Q}%
+    }%
+    \pdfxform resources { /ExtGState << /TexDiffImageOpacity << /ca 0.2 /CA 0.2 >> >> }
+      \TexDiffImageBox
+    \setbox\TexDiffImageBox=\hbox{\pdfrefxform\pdflastxform}%
+  \fi\fi
+}
+
+\newcommand{\TexDiffXeImageGroup}[1]{%
+  \global\advance\TexDiffImageIndex\@ne
+  \edef\TexDiffImageName{@TexDiffImage\the\TexDiffImageIndex}%
+  \setbox\TexDiffImageBox=\hbox{%
+    \special{pdf:bxobj \TexDiffImageName\space
+      width \the\wd\TexDiffImageBox\space
+      height \the\ht\TexDiffImageBox\space
+      depth \the\dp\TexDiffImageBox}%
+    \copy\TexDiffImageBox
+    \special{pdf:put @resources << /ExtGState << /TexDiffImageOpacity << /ca 0.2 /CA 0.2 >> >> >>}%
+    \special{pdf:exobj << #1 >>}%
+    \kern-\wd\TexDiffImageBox
+    \special{pdf:uxobj \TexDiffImageName}%
+    \kern\wd\TexDiffImageBox
+  }%
+}
+
+\newcommand{\TexDiffMuteGraphics}{%
+  \let\TexDiffOriginalGraphics\Ginclude@graphics
+  \def\Ginclude@graphics##1{%
+    \leavevmode
+    \begingroup
+      \setbox\TexDiffImageBox=\hbox{\TexDiffOriginalGraphics{##1}}%
+      \TexDiffMutedImage
+      \box\TexDiffImageBox
+    \endgroup
+  }%
+}
+\AddToHook{package/graphics/after}{\TexDiffMuteGraphics}
+\makeatother

@@ -425,20 +425,27 @@ fn unborn_staged_branch_and_whole_document_deletion_work() {
 #[test]
 fn compilation_failure_preserves_existing_output_and_retains_logs() {
     let f = Fixture::new();
-    f.write("\\nonexistentcommand");
+    f.write("\\firstmissingcommand\n\n\\secondmissingcommand");
     let output = f.temporary.path().join("existing.pdf");
     fs::write(&output, b"existing output").unwrap();
     let (result, _, _) = f.execute(&[], 2, None, None, Some(&output));
     assert_eq!(fs::read(&output).unwrap(), b"existing output");
-    assert!(String::from_utf8_lossy(&result.stderr).contains("build files retained"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("build files retained"));
+    assert!(stderr.contains("Undefined control sequence."));
+    assert!(stderr.contains(r"\firstmissingcommand"), "{stderr}");
+    assert!(stderr.contains(r"\secondmissingcommand"), "{stderr}");
+    let retained = f.retained.borrow();
+    let build = retained.last().unwrap().join("review-build");
+    let log = fs::read_to_string(build.join("main.log")).unwrap();
+    assert!(log.contains(r"\firstmissingcommand") && log.contains(r"\secondmissingcommand"));
     assert!(
-        f.retained
-            .borrow()
-            .last()
-            .unwrap()
-            .join("review-build/build.log")
-            .is_file()
+        build.join("main.pdf").is_file(),
+        "TeX should continue to output a PDF even though compilation fails"
     );
+    let commands = fs::read_to_string(build.join("build.log")).unwrap();
+    assert!(commands.contains("-interaction=nonstopmode"));
+    assert!(!commands.contains("-halt-on-error"));
 }
 
 #[test]
@@ -1080,12 +1087,16 @@ fn page_count(path: &Path) -> usize {
 }
 
 fn assert_unchanged_pagination(workspace: &Path) {
+    assert_unchanged_pagination_with_engine(workspace, "pdflatex");
+}
+
+fn assert_unchanged_pagination_with_engine(workspace: &Path, engine: &str) {
     for side in ["old", "new"] {
         let original = tex_diff::build::compile(
             &workspace.join(side),
             Path::new("main.tex"),
             &workspace.join(format!("{side}-original")),
-            "pdflatex",
+            engine,
             Duration::from_secs(30),
         )
         .unwrap();
@@ -1333,9 +1344,174 @@ fn separate_preamble_and_renewed_macros_work_in_both_modes() {
     }
 }
 
+#[test]
+fn internal_label_macros_compile_in_both_review_modes() {
+    let f = Fixture::new();
+    let preamble = concat!(
+        "\\documentclass{article}\\usepackage{amsmath}\n",
+        "\\newcounter{workrule}\\AtBeginDocument{\\let\\workrulelabel\\label}\n",
+    );
+    let body = concat!(
+        r"Unchanged opening.\[\begin{array}{rc}",
+        r"\workrule[\downarrow]{Val}&x=1\\\workrule{Var}&x=2\end{array}\]",
+        r"Rules~\ref{rule:Val} and~\ref{rule:Var}.\clearpage Entire appendix stays.",
+    );
+    let old = concat!(
+        r"\newcommand{\workrule}[2][\rightarrow]{",
+        r"\refstepcounter{workrule}\workrulelabel{rule:#2}#1_{\theworkrule}}",
+    );
+    f.source("main.tex", &(preamble.to_owned() + old), body);
+    f.git(&["add", "."]);
+    f.commit("numbered rules");
+    let new = concat!(
+        r"\makeatletter\newcommand{\workrule}[2][\rightarrow]{",
+        r"\protected@edef\@currentlabel{\textsf{#2}}\workrulelabel{rule:#2}#1}",
+        r"\makeatother",
+    );
+    f.source("main.tex", &(preamble.to_owned() + new), body);
+    for mode in ["unified", "side-by-side"] {
+        let (_, pdf, report) = f.execute(&["--mode", mode, "--keep-build"], 0, None, None, None);
+        let text = pdf_text(&pdf);
+        assert!(text.contains("Unchanged opening.") && text.contains("Entire appendix stays."));
+        assert!(text.contains("Val") && !text.contains("??"));
+        let report: Report = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+        assert_eq!((report.removed_objects, report.added_objects), (1, 1));
+        if mode == "side-by-side" {
+            assert_unchanged_pagination(f.retained.borrow().last().unwrap());
+        } else {
+            let retained = f.retained.borrow();
+            let log =
+                fs::read_to_string(retained.last().unwrap().join("review-build/main.log")).unwrap();
+            assert!(
+                !log.contains("multiply defined"),
+                "rule labels were duplicated"
+            );
+        }
+    }
+}
+
+#[test]
+fn removed_figures_keep_their_references_in_the_unified_review() {
+    let f = Fixture::new();
+    let preamble = PREAMBLE.to_owned() + r"\usepackage{hyperref}";
+    let old = concat!(
+        r"The entire introduction stays.\begin{figure}[ht]",
+        r"\rule{30pt}{20pt}\caption{An original drawing}\label{old-drawing}\end{figure}",
+        r"The original drawing is \autoref{old-drawing}; see page~\pageref{old-drawing}.",
+        r"\clearpage The entire appendix stays.",
+    );
+    f.source("main.tex", &preamble, old);
+    f.git(&["add", "."]);
+    f.commit("referenced figure");
+    f.source(
+        "main.tex",
+        &preamble,
+        &old.replace("original", "updated")
+            .replace("old-drawing", "new-drawing"),
+    );
+    let (_, pdf, _) = f.execute(&["--keep-build"], 0, None, None, None);
+    let text = pdf_text(&pdf);
+    assert!(text.contains("original drawing is Figure 1"), "{text}");
+    assert!(text.contains("updated drawing is Figure 2"), "{text}");
+    assert!(!text.contains("??"));
+    let retained = f.retained.borrow();
+    let log = fs::read_to_string(retained.last().unwrap().join("review-build/main.log")).unwrap();
+    assert!(!log.contains("undefined references"));
+}
+
+#[test]
+fn changed_commands_preserve_saved_boxes_in_both_review_modes() {
+    let f = Fixture::new();
+    let preamble = concat!(
+        "\\documentclass{article}\\usepackage{amsmath,lineno}\\linenumbers\n",
+        "\\newsavebox{\\savedgrammar}\n",
+        "\\newcommand{\\storegrammar}[1]{%\n  \\sbox{\\savedgrammar}{#1}%\n",
+        "  \\ifdim\\wd\\savedgrammar>0pt\\relax\\fi%\n}\n",
+    );
+    let body = concat!(
+        "\\storegrammar{First unchanged grammar}\n\n",
+        "\\[\\usebox{\\savedgrammar}\\]\\clearpage\n",
+        "\\storegrammar{Second original grammar}\n\n",
+        "\\[\\usebox{\\savedgrammar}\\]The entire appendix stays.",
+    );
+    f.source("main.tex", preamble, body);
+    f.git(&["add", "."]);
+    f.commit("stored grammars");
+    f.source("main.tex", preamble, &body.replace("original", "updated"));
+    for mode in ["unified", "side-by-side"] {
+        let (_, pdf, _) = f.execute(&["--mode", mode, "--keep-build"], 0, None, None, None);
+        let text = pdf_text(&pdf);
+        assert!(text.contains("Second updated grammar"));
+        if mode == "side-by-side" {
+            assert!(text.contains("Second original grammar"));
+            assert_unchanged_pagination(f.retained.borrow().last().unwrap());
+            let (red, blue) =
+                colored_pixels_on_page(&pdf, &f.temporary.path().join("box-colors"), 2);
+            assert!(
+                red > 50 && blue > 50,
+                "saved box colors missing: red={red}, blue={blue}"
+            );
+        }
+    }
+}
+
+#[test]
+fn whole_lists_and_theorems_keep_their_pagination_when_added_or_removed() {
+    let f = Fixture::new();
+    let preamble = concat!(
+        "\\documentclass{article}\\usepackage{amsmath,amsthm,lineno}\n",
+        "\\linenumbers\\newtheorem{thm}{Theorem}\n",
+    );
+    let old = concat!(
+        r"Opening sentence.\begin{itemize}\item First original item.",
+        r"\item Second original item.\end{itemize}",
+        r"\clearpage Every appendix sentence stays.",
+    );
+    f.source("main.tex", preamble, old);
+    f.git(&["add", "."]);
+    f.commit("whole list");
+    let new = concat!(
+        r"Opening sentence.\begin{thm}[An added theorem]",
+        r"For every value $x$, the result is $x$.\end{thm}",
+        r"\begin{proof}The result follows directly.\end{proof}",
+        r"\clearpage Every appendix sentence stays.",
+    );
+    f.source("main.tex", preamble, new);
+    f.diff(&["--mode", "side-by-side", "--keep-build"]);
+    assert_unchanged_pagination(f.retained.borrow().last().unwrap());
+}
+
 fn colored_pixels(pdf: &Path, prefix: &Path) -> (usize, usize) {
+    colored_pixels_on_page(pdf, prefix, 1)
+}
+
+fn colored_pixels_on_page(pdf: &Path, prefix: &Path, page: usize) -> (usize, usize) {
+    let pixels = page_pixels(pdf, prefix, page);
+    let red = pixels
+        .chunks_exact(3)
+        .filter(|p| p[0] > 130 && p[1] < 100 && p[2] < 100)
+        .count();
+    let blue = pixels
+        .chunks_exact(3)
+        .filter(|p| p[2] > 130 && p[0] < 100 && p[1] < 120)
+        .count();
+    (red, blue)
+}
+
+fn page_pixels(pdf: &Path, prefix: &Path, page: usize) -> Vec<u8> {
+    page_pixels_with_resolution(pdf, prefix, page, 72)
+}
+
+fn page_pixels_with_resolution(pdf: &Path, prefix: &Path, page: usize, dpi: u32) -> Vec<u8> {
     let output = Command::new("pdftoppm")
-        .args(["-f", "1", "-singlefile", "-r", "72", "-png"])
+        .args([
+            "-f",
+            &page.to_string(),
+            "-singlefile",
+            "-r",
+            &dpi.to_string(),
+            "-png",
+        ])
         .arg(pdf)
         .arg(prefix)
         .output()
@@ -1352,16 +1528,267 @@ fn colored_pixels(pdf: &Path, prefix: &Path) -> (usize, usize) {
     let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buffer).unwrap();
     assert_eq!(info.color_type, png::ColorType::Rgb);
-    let pixels = &buffer[..info.buffer_size()];
-    let red = pixels
+    buffer.truncate(info.buffer_size());
+    buffer
+}
+
+fn pixels_near(pixels: &[u8], color: [u8; 3]) -> usize {
+    pixels
         .chunks_exact(3)
-        .filter(|p| p[0] > 130 && p[1] < 100 && p[2] < 100)
-        .count();
-    let blue = pixels
-        .chunks_exact(3)
-        .filter(|p| p[2] > 130 && p[0] < 100 && p[1] < 120)
-        .count();
-    (red, blue)
+        .filter(|pixel| pixel.iter().zip(color).all(|(a, b)| a.abs_diff(b) <= 2))
+        .count()
+}
+
+#[test]
+fn grayscale_documents_keep_review_colors_saturated() {
+    let f = Fixture::new();
+    let preamble = PREAMBLE.to_owned() + r"\usepackage[gray]{xcolor}";
+    let body = "The original conclusion includes every example and explains the complete document. This sentence remains.";
+    f.source("main.tex", &preamble, body);
+    f.git(&["add", "."]);
+    f.commit("grayscale palette");
+    f.source("main.tex", &preamble, &body.replace("original", "updated"));
+    for mode in ["unified", "side-by-side"] {
+        let (_, pdf, _) = f.execute(&["--mode", mode], 0, None, None, None);
+        let (red, blue) = colored_pixels(&pdf, &f.temporary.path().join("gray-palette"));
+        assert!(
+            red > 50 && blue > 50,
+            "review colors were muted: {red}, {blue}"
+        );
+    }
+}
+
+#[test]
+fn original_colors_and_imported_graphics_are_muted_in_both_modes_and_all_engines() {
+    let f = Fixture::new();
+    png(&f.repo.join("palette.png"), [255, 0, 0]);
+    png(&f.repo.join("changed.png"), [0, 255, 0]);
+    let drawing = f.temporary.path().join("drawing");
+    fs::create_dir(&drawing).unwrap();
+    fs::write(
+        drawing.join("drawing.tex"),
+        concat!(
+            r"\documentclass{article}\usepackage{xcolor,geometry}",
+            r"\geometry{paperwidth=100pt,paperheight=100pt,margin=0pt}",
+            r"\pagestyle{empty}\begin{document}\noindent",
+            r"\textcolor{blue}{\rule{90pt}{80pt}}\end{document}",
+        ),
+    )
+    .unwrap();
+    let drawing_pdf = tex_diff::build::compile(
+        &drawing,
+        Path::new("drawing.tex"),
+        &drawing.join("build"),
+        "pdflatex",
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    fs::copy(drawing_pdf, f.repo.join("palette.pdf")).unwrap();
+    let preamble = PREAMBLE.to_owned()
+        + concat!(
+            r"\usepackage[dvipsnames]{xcolor}\usepackage{tikz}",
+            r"\usepackage[colorlinks,linkcolor=red,urlcolor=blue]{hyperref}",
+            r"\definecolor{originalreviewred}{RGB}{204,20,20}",
+            r"\definecolor{originalreviewblue}{rgb}{0.05882,0.2,0.85098}",
+            r"\definecolor{mutedgrayblue}{RGB}{104,112,120}",
+            r"\colorlet{customcolor}{yellow!50!blue}",
+            r"\colorlet{redalias}{red!100!black}\colorlet{nestedalias}{redalias}",
+            r"\newsavebox{\logo}\sbox{\logo}{\includegraphics[width=30pt]{palette.png}}",
+            r"\makeatletter\newcommand{\protectedpalette}{\iftrue",
+            r"\textcolor{green}{A protected green label}\fi}\makeatother",
+        );
+    let body = concat!(
+        r"\section{The complete unchanged page}",
+        r"\textcolor{red}{An original red label.} ",
+        r"\textcolor{blue}{An original blue label.} ",
+        r"\textcolor{yellow}{An original yellow label.} ",
+        r"\textcolor[HTML]{FF00FF}{An explicit color label.} ",
+        r"\textcolor{originalreviewred}{A matching red label.} ",
+        r"\textcolor{originalreviewblue}{A matching blue label.} ",
+        r"\protectedpalette\ \textcolor{customcolor}{A mixed color label.} ",
+        r"\par\noindent",
+        r"\textcolor{red}{\rule{30pt}{10pt}}\quad",
+        r"\textcolor{nestedalias}{\rule{30pt}{10pt}}\quad",
+        r"{\color{red}\colorlet{currentalias}{.}\colorlet{anotheralias}{currentalias}",
+        r"\color{anotheralias}\rule{30pt}{10pt}}\quad",
+        r"\textcolor{blue}{\rule{30pt}{10pt}}\quad",
+        r"{\color{red}\colorlet{redefinedalias}{.}",
+        r"\definecolor{redefinedalias}{rgb}{0,0,1}",
+        r"\color{redefinedalias}\rule{30pt}{10pt}}\quad",
+        r"\textcolor{yellow}{\rule{30pt}{10pt}}\par",
+        r"\textcolor[gray]{0.5}{\rule{30pt}{10pt}}\quad",
+        r"\textcolor{black}{\rule{30pt}{10pt}}\quad",
+        r"\textcolor{mutedgrayblue}{\rule{30pt}{10pt}}\par",
+        r"\usebox{\logo}\quad\includegraphics[width=60pt]{palette.png}\quad",
+        r"\includegraphics[width=60pt,angle=15]{palette.pdf}\par",
+        r"\tikz\fill[red] (0,0) rectangle (1,1);",
+        r"\quad\tikz\shade[top color=blue,bottom color=blue] (0,0) rectangle (1,1);",
+        r"\clearpage An original sentence is shown here.\par",
+        r"\begin{figure}[ht]\includegraphics[width=100pt]{changed.png}",
+        r"\caption{A changed graphic}\end{figure}",
+    );
+    f.source("main.tex", &preamble, body);
+    f.git(&["add", "."]);
+    f.git(&["add", "-f", "palette.pdf"]);
+    f.commit("colored document");
+    f.source(
+        "main.tex",
+        &preamble,
+        &body.replace("original sentence", "updated sentence"),
+    );
+    png(&f.repo.join("changed.png"), [255, 0, 255]);
+    for engine in ["pdflatex", "xelatex", "lualatex"] {
+        for mode in ["unified", "side-by-side"] {
+            let (_, pdf, _) = f.execute(
+                &["--mode", mode, "--engine", engine, "--keep-build"],
+                0,
+                None,
+                None,
+                None,
+            );
+            let prefix = f.temporary.path().join(format!("muted-{engine}-{mode}"));
+            let pages = if mode == "side-by-side" {
+                let retained = f.retained.borrow();
+                let workspace = retained.last().unwrap();
+                vec![
+                    workspace.join("old-build/old.pdf"),
+                    workspace.join("new-build/new.pdf"),
+                ]
+            } else {
+                vec![pdf.clone()]
+            };
+            for page in pages {
+                let pixels = page_pixels(&page, &prefix, 1);
+                let chromatic = pixels
+                    .chunks_exact(3)
+                    .filter(|pixel| pixel.iter().max().unwrap() - pixel.iter().min().unwrap() > 65)
+                    .count();
+                assert_eq!(
+                    chromatic, 0,
+                    "original colors remain saturated in {engine} {mode}"
+                );
+                for (color, minimum) in [
+                    ([159, 96, 96], 1400),
+                    ([96, 96, 159], 1000),
+                    ([159, 159, 96], 200),
+                    ([128, 128, 128], 200),
+                    ([0, 0, 0], 200),
+                    ([104, 112, 120], 200),
+                ] {
+                    let count = pixels_near(&pixels, color);
+                    assert!(
+                        count > minimum,
+                        "hue or lightness lost in {engine} {mode}: {color:?}, {count} pixels"
+                    );
+                }
+                assert!(
+                    pixels
+                        .chunks_exact(3)
+                        .filter(|pixel| pixel[0] < 230)
+                        .count()
+                        > 1000
+                );
+                assert!(page_text(&page, 1).contains("The complete unchanged page"));
+            }
+            let (red, blue) = colored_pixels_on_page(&pdf, &prefix, 2);
+            assert!(
+                red > 100 && blue > 100,
+                "diff colors missing in {engine} {mode}"
+            );
+            let pixels = page_pixels(&pdf, &prefix, 2);
+            let original_image_colors = pixels
+                .chunks_exact(3)
+                .filter(|pixel| {
+                    pixel[1] > 130 && pixel[0] < 100 && pixel[2] < 100
+                        || pixel[0] > 130 && pixel[2] > 130 && pixel[1] < 100
+                })
+                .count();
+            assert_eq!(original_image_colors, 0, "changed image colors remain");
+            if mode == "side-by-side" {
+                assert_unchanged_pagination_with_engine(
+                    f.retained.borrow().last().unwrap(),
+                    engine,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn links_citations_and_references_keep_their_original_colors_in_both_modes_and_all_engines() {
+    let f = Fixture::new();
+    let preamble = PREAMBLE.to_owned()
+        + concat!(
+            r"\usepackage{xcolor}\colorlet{originalurlcolor}{red!50!blue}",
+            r"\colorlet{originallinkcolor}{green!60!black}",
+            r"\usepackage[colorlinks]{hyperref}",
+            r"\hypersetup{urlcolor=originalurlcolor,linkcolor=originallinkcolor,",
+            r"citecolor={[RGB]{23,75,201}}}",
+        );
+    let body = concat!(
+        r"\section{Target}\label{target}\hypertarget{anchor}{}",
+        r"\href{https://example.invalid}{\rule{30pt}{10pt}}\quad",
+        r"\hyperlink{anchor}{\rule{30pt}{10pt}}\quad",
+        r"\textbf{\cite{reference}}\quad\textbf{\autoref{target}}",
+        r"\clearpage The original conclusion links to ",
+        r"\href{https://example.invalid}{\textbf{the article}}, cites \textbf{\cite{reference}}, ",
+        r"and refers to \textbf{\autoref{target}}.\par",
+        r"\begin{thebibliography}{1}\bibitem[Reference2026]{reference}",
+        r"The unchanged reference.\end{thebibliography}",
+    );
+    f.source("main.tex", &preamble, body);
+    f.git(&["add", "."]);
+    f.commit("colored links and citations");
+    f.source(
+        "main.tex",
+        &preamble,
+        &body.replace("original conclusion", "updated conclusion"),
+    );
+    for engine in ["pdflatex", "xelatex", "lualatex"] {
+        for mode in ["unified", "side-by-side"] {
+            let (_, pdf, _) = f.execute(
+                &["--mode", mode, "--engine", engine, "--keep-build"],
+                0,
+                None,
+                None,
+                None,
+            );
+            let prefix = f.temporary.path().join(format!("links-{engine}-{mode}"));
+            let pages = if mode == "side-by-side" {
+                let retained = f.retained.borrow();
+                let workspace = retained.last().unwrap();
+                vec![
+                    workspace.join("old-build/old.pdf"),
+                    workspace.join("new-build/new.pdf"),
+                ]
+            } else {
+                vec![pdf.clone()]
+            };
+            for page in pages {
+                for number in [1, 2] {
+                    let pixels = page_pixels_with_resolution(&page, &prefix, number, 144);
+                    for color in [[128, 0, 128], [0, 153, 0], [23, 75, 201]] {
+                        let count = pixels_near(&pixels, color);
+                        assert!(
+                            count > 20,
+                            "link or citation color changed in {engine} {mode}, page {number}: {color:?}, {count} pixels"
+                        );
+                    }
+                }
+            }
+            let (red, blue) = colored_pixels_on_page(&pdf, &prefix, 2);
+            assert!(
+                red > 50 && blue > 50,
+                "diff colors missing in {engine} {mode}"
+            );
+            if mode == "side-by-side" {
+                assert_unchanged_pagination_with_engine(
+                    f.retained.borrow().last().unwrap(),
+                    engine,
+                );
+            }
+        }
+    }
 }
 
 #[test]

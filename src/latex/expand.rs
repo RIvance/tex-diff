@@ -100,10 +100,13 @@ pub(super) fn definition(tokens: &[Token], start: usize) -> Option<(Macro, usize
         return None;
     }
     let (body, end) = lexer::group(tokens, i)?;
-    expandable &= !body.iter().any(|token| {
+    // Internal control sequences retain the catcodes they had when defined.
+    // Writing them into the document body would tokenize @ differently, so
+    // leave their execution to TeX, including those in optional defaults.
+    expandable &= !body.iter().chain(default.iter().flatten()).any(|token| {
         matches!(
             &token.kind,
-            Kind::Command(name) if name.starts_with("if") || [
+            Kind::Command(name) if name.contains('@') || name.starts_with("if") || [
                 "else", "fi", "csname", "endcsname", "catcode", "newcommand",
                 "renewcommand", "def", "edef", "gdef", "xdef", "global", "let",
                 "futurelet", "loop", "repeat", "write", "input", "include",

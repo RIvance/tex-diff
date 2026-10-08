@@ -160,6 +160,10 @@ fn parse(source: &str, path: &Path, rule: Rule, initial_column: usize) -> Result
                 return Ok(());
             }
             Rule::comment | Rule::EOI => return Ok(()),
+            // TeX ignores indentation at the start of a physical line. In
+            // particular, a comment consumes its newline; retaining the next
+            // line's indentation would add spaces to stored macro bodies.
+            Rule::space if source.column == 1 && !raw.contains('\n') => return Ok(()),
             Rule::command
             | Rule::new_command_head
             | Rule::definition_head

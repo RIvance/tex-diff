@@ -4,6 +4,10 @@ Review LaTeX source changes in a Git project as a PDF of the whole document. Rem
 sentences and objects are red; additions are blue. Run `tex-diff` to build the
 review and open it in your PDF viewer.
 
+Original text and drawing colors retain their hue with reduced saturation, and
+imported graphics are faded. Links, citations, and linked references keep their
+original colors. This applies to both review modes.
+
 ![Unified review example](examples/review.png)
 
 [Unified PDF example](examples/review.pdf) ·
@@ -164,6 +168,8 @@ tex-diff --keep-build --timeout 180
 tex-diff --help
 ```
 
+LaTeX runs in nonstop mode to report errors beyond the first one. Compilation
+errors are shown with source context; the full log stays in the build directory.
 Failed runs retain build files and logs and print their location. `--keep-build`
 also retains them after success. The default timeout is 120 seconds for source
 comparison and for each compilation.
